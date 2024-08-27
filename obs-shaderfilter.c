@@ -151,8 +151,10 @@ struct shader_filter_data {
 	gs_effect_t *output_effect;
 
 	gs_texrender_t *input_texrender;
+	gs_texrender_t *input_prev_output_texrender;
 	gs_texrender_t *output_texrender;
 	gs_eparam_t *param_output_image;
+	gs_eparam_t *param_prev_output_image;
 
 	bool reload_effect;
 	struct dstr last_path;
@@ -465,6 +467,8 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 	// Store references to the new effect's parameters.
 	da_free(filter->stored_param_list);
 
+	filter->param_prev_output_image = NULL;
+
 	size_t effect_count = gs_effect_get_num_params(filter->effect);
 	for (size_t effect_index = 0; effect_index < effect_count; effect_index++) {
 		gs_eparam_t *param = gs_effect_get_param_by_idx(filter->effect, effect_index);
@@ -496,6 +500,8 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 			// Nothing.
 		} else if (strcmp(info.name, "image") == 0) {
 			filter->param_image = param;
+		} else if (strcmp(info.name, "prev_output_image") == 0) {
+			filter->param_prev_output_image = param;
 		} else if (filter->transition && strcmp(info.name, "image_a") == 0) {
 			filter->param_image_a = param;
 		} else if (filter->transition && strcmp(info.name, "image_b") == 0) {
@@ -605,6 +611,8 @@ static void shader_filter_destroy(void *data)
 		gs_effect_destroy(filter->output_effect);
 	if (filter->input_texrender)
 		gs_texrender_destroy(filter->input_texrender);
+	if (filter->input_prev_output_texrender)
+		gs_texrender_destroy(filter->input_prev_output_texrender);
 	if (filter->output_texrender)
 		gs_texrender_destroy(filter->output_texrender);
 
@@ -2587,6 +2595,52 @@ static void draw_output(struct shader_filter_data *filter)
 	obs_source_process_filter_end(filter->context, pass_through, filter->total_width, filter->total_height);
 }
 
+static void copy_last_output_to_input_prev(struct shader_filter_data *filter)
+{
+	if (!filter->output_texrender || !filter->param_prev_output_image) {
+		return;
+	}
+
+	const enum gs_color_space preferred_spaces[] = {
+		GS_CS_SRGB,
+		GS_CS_SRGB_16F,
+		GS_CS_709_EXTENDED,
+	};
+
+	const enum gs_color_space source_space =
+		obs_source_get_color_space(obs_filter_get_target(filter->context), OBS_COUNTOF(preferred_spaces), preferred_spaces);
+
+	const enum gs_color_format format = gs_get_format_from_space(source_space);
+
+	// Set up our input_prev_output_texrender to catch the output texture.
+	filter->input_prev_output_texrender = create_or_reset_texrender(filter->input_prev_output_texrender);
+
+	if (!obs_source_process_filter_begin_with_color_space(filter->context, format, source_space, OBS_NO_DIRECT_RENDERING)) {
+		return;
+	}
+
+	gs_texture_t *texture = gs_texrender_get_texture(filter->output_texrender);
+	gs_effect_t *pass_through = filter->output_effect;
+
+	if (filter->param_output_image) {
+		gs_effect_set_texture(filter->param_output_image, texture);
+	}
+
+	if (gs_texrender_begin(filter->input_prev_output_texrender, filter->total_width, filter->total_height)) {
+		gs_blend_state_push();
+		gs_reset_blend_state();
+		gs_enable_blending(false);
+		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+
+		gs_ortho(0.0f, (float)filter->total_width, 0.0f, (float)filter->total_height, -100.0f, 100.0f);
+
+		obs_source_process_filter_end(filter->context, pass_through, filter->total_width, filter->total_height);
+
+		gs_texrender_end(filter->input_prev_output_texrender);
+		gs_blend_state_pop();
+	}
+}
+
 void shader_filter_set_effect_params(struct shader_filter_data *filter)
 {
 
@@ -2623,6 +2677,13 @@ void shader_filter_set_effect_params(struct shader_filter_data *filter)
 	}
 	if (filter->param_rand_instance_f != NULL) {
 		gs_effect_set_float(filter->param_rand_instance_f, filter->rand_instance_f);
+	}
+
+	if (filter->param_prev_output_image != NULL && filter->input_prev_output_texrender != NULL) {
+		// If the output_image is named prev_output_image, it will not get reset before rendering.
+		// Set it here so it is available inside the shader.
+		gs_texture_t *texture = gs_texrender_get_texture(filter->input_prev_output_texrender);
+		gs_effect_set_texture(filter->param_prev_output_image, texture);
 	}
 
 	size_t param_count = filter->stored_param_list.num;
@@ -2756,6 +2817,7 @@ static void shader_filter_render(void *data, gs_effect_t *effect)
 	get_input_source(filter);
 
 	filter->rendering = true;
+	copy_last_output_to_input_prev(filter);
 	render_shader(filter);
 	draw_output(filter);
 	filter->rendered = true;
