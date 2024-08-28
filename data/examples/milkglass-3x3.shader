@@ -76,6 +76,11 @@ uniform float seconds<
     float step = 0.0166;
 > = 3;
 
+uniform bool ignore_alpha_for_output<
+    string label = "Set alpha value to 1 for output colors";
+    string widget_type = "checkbox";
+>= true;
+
 uniform string Guide<
     string widget_type = "info";
 > = "1. Create a new 'Color Source' with a full transparent black color.\n\
@@ -140,24 +145,19 @@ float4 calculateNewPixel(int pixelX, int pixelY)
         transparent = transparent / float(count); 
     else
         transparent = 1;
+    
+    c.a = transparent;
 
     // This block recolorss dark and bright areas.
     if (limit_history_value)
     {
-        c *= transparent;
-        c.a = 1;
-
         float luminance = c.r * 0.299 + c.g * 0.587 + c.b * 0.114;
 
         if (luminance < lumaMin) {
-            c = lerp(dark_color, c, luminance / lumaMin);
+            c.rgb = lerp(dark_color.rgb, c.rgb, luminance / lumaMin);
         } else if (luminance > lumaMax) {
-            c = lerp(c, bright_color, (luminance - lumaMax) / (1.0 - lumaMax));
-        }        
-    }
-    else
-    {
-        c.a = transparent;
+            c.rgb = lerp(c.rgb, bright_color.rgb, (luminance - lumaMax) / (1.0 - lumaMax));
+        }
     }
 
     return c;
@@ -166,7 +166,11 @@ float4 calculateNewPixel(int pixelX, int pixelY)
 float4 combineHistory(int pixelX, int pixelY) 
 {
     if (seconds == 0) {
-        return calculateNewPixel(pixelX - 5, pixelY - 5);
+        float4 result = calculateNewPixel(pixelX - 5, pixelY - 5);
+        if (ignore_alpha_for_output) {
+            result.a = 1;
+        }
+        return result;
     }
 
     // Calculate the relative pixel position within the tile
@@ -206,28 +210,23 @@ float4 combineHistory(int pixelX, int pixelY)
         c /= samples;
 
     // Adjust the transparency value separately
-    if (count > 0)
+    if (count > 0 && !ignore_alpha_for_output)
         transparent = transparent / float(count);
     else
         transparent = 1;
 
+    c.a = transparent;
+
     // This block recolorss dark and bright areas.
     if (limit_final_value)
     {
-        c *= transparent;
-        c.a = 1;
-
         float luminance = c.r * 0.299 + c.g * 0.587 + c.b * 0.114;
 
         if (luminance < lumaMin) {
-            c = lerp(dark_color, c, luminance / lumaMin);
+            c.rgb = lerp(dark_color.rgb, c.rgb, luminance / lumaMin);
         } else if (luminance > lumaMax) {
-            c = lerp(c, bright_color, (luminance - lumaMax) / (1.0 - lumaMax));
+            c.rgb = lerp(c.rgb, bright_color.rgb, (luminance - lumaMax) / (1.0 - lumaMax));
         }
-    }
-    else 
-    {
-        c.a = transparent;
     }
 
     return c;
